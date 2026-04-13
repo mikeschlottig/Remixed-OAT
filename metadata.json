@@ -1,0 +1,5 @@
+{
+  "name": "Remix: Obsidian Agentic Terminal (OAT)",
+  "description": "A deep-integration terminal plugin for Obsidian with agentic capabilities, RAG support, and session logging.",
+  "requestFramePermissions": []
+}

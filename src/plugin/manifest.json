@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-agentic-terminal",
+  "name": "Obsidian Agentic Terminal (OAT)",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "A deep-integration terminal plugin for Obsidian with agentic capabilities and RAG support.",
+  "author": "mikeschlottig44",
+  "authorUrl": "https://github.com/mikeschlottig44",
+  "isDesktopOnly": true
+}
