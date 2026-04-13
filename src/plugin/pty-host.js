@@ -8,12 +8,63 @@ const os = require('os');
 const pty = require('node-pty'); // Requires native compilation
 const WebSocket = require('ws');
 const http = require('http');
+const fs = require('fs');
 const { GoogleGenAI, Type } = require('@google/genai');
 
 const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
 
 const wss = new WebSocket.Server({ port: 3001 });
 const activePtys = new Set();
+
+const subscriptions = [
+  {
+    id: 'sub-1',
+    event: 'file_created',
+    action: 'agent_prompt',
+    promptTemplate: 'A new file was created at {{path}}. Give a short, 1-sentence enthusiastic acknowledgment.'
+  }
+];
+
+async function handleEvent(event, payload) {
+  const subs = subscriptions.filter(s => s.event === event);
+  for (const sub of subs) {
+    if (sub.action === 'agent_prompt') {
+      try {
+        let prompt = sub.promptTemplate;
+        if (payload.path) prompt = prompt.replace('{{path}}', payload.path);
+        
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: `System: You are OAT Agent acting autonomously on an event.\nUser: ${prompt}`
+        });
+        
+        const message = response.text;
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: "AGENT_BROADCAST", data: message }));
+          }
+        });
+      } catch (e) {
+        console.error("Autonomous agent error:", e);
+      }
+    }
+  }
+}
+
+try {
+  fs.watch(process.cwd(), (eventType, filename) => {
+    if (filename && eventType === 'rename') {
+      fs.access(filename, fs.constants.F_OK, (err) => {
+        if (!err) {
+          handleEvent('file_created', { path: filename });
+        }
+      });
+    }
+  });
+} catch (e) {
+  console.error("Failed to start watcher:", e);
+}
 
 wss.on('connection', (ws) => {
   console.log('Plugin connected to Sidecar');
@@ -130,6 +181,34 @@ const ipcServer = http.createServer((req, res) => {
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'executed', command }));
+      } catch (e) {
+        res.writeHead(400);
+        res.end('Bad Request');
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/api/v1/events/emit') {
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', () => {
+      try {
+        const { event, payload } = JSON.parse(body);
+        handleEvent(event, payload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'received' }));
+      } catch (e) {
+        res.writeHead(400);
+        res.end('Bad Request');
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/api/v1/subscriptions') {
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', () => {
+      try {
+        const sub = { id: Date.now().toString(), ...JSON.parse(body) };
+        subscriptions.push(sub);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(sub));
       } catch (e) {
         res.writeHead(400);
         res.end('Bad Request');

@@ -20,11 +20,13 @@ import { motion, AnimatePresence } from "motion/react";
 function TerminalPane({ 
   id, 
   onClose, 
-  setNotes 
+  setNotes,
+  setAgentOutput
 }: { 
   id: number; 
   onClose: (id: number) => void;
   setNotes: React.Dispatch<React.SetStateAction<{ name: string; content: string }[]>>;
+  setAgentOutput: React.Dispatch<React.SetStateAction<string | null>>;
 }) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
@@ -71,6 +73,8 @@ function TerminalPane({
         if (payload.data.type === "NOTIFY_FILE_CREATED") {
           setNotes(prev => [...prev, { name: payload.data.path, content: "# New Note\nCreated via OAT." }]);
         }
+      } else if (payload.type === "AGENT_BROADCAST") {
+        setAgentOutput(`[Autonomous] ${payload.data}`);
       }
     };
 
@@ -152,6 +156,13 @@ export default function App() {
         const { name, content } = data.actionArgs;
         setNotes(prev => [...prev, { name, content }]);
         setAgentOutput(`Created note: ${name}\n\n${data.message}`);
+        try {
+          await fetch("/api/v1/events/emit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event: "file_created", payload: { path: name } })
+          });
+        } catch (e) { console.error(e); }
       } else if (data.action === "searchVault" && data.actionArgs) {
         const { query } = data.actionArgs;
         const results = notes.filter(n => n.name.includes(query) || n.content.includes(query));
@@ -231,7 +242,17 @@ export default function App() {
                 </div>
               ))}
               <button 
-                onClick={() => setNotes(prev => [...prev, { name: `Untitled ${prev.length}.md`, content: "" }])}
+                onClick={async () => {
+                  const newName = `Untitled ${notes.length}.md`;
+                  setNotes(prev => [...prev, { name: newName, content: "" }]);
+                  try {
+                    await fetch("/api/v1/events/emit", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ event: "file_created", payload: { path: newName } })
+                    });
+                  } catch (e) { console.error(e); }
+                }}
                 className="w-full mt-2 p-2 border border-dashed border-[#333] rounded text-[#555] hover:text-[#888] hover:border-[#444] flex items-center justify-center gap-2 text-xs transition-colors"
               >
                 <Plus size={14} /> New Note
@@ -250,7 +271,7 @@ export default function App() {
                 </div>
               ) : (
                 terminals.map(id => (
-                  <TerminalPane key={id} id={id} onClose={handleClosePane} setNotes={setNotes} />
+                  <TerminalPane key={id} id={id} onClose={handleClosePane} setNotes={setNotes} setAgentOutput={setAgentOutput} />
                 ))
               )}
             </div>

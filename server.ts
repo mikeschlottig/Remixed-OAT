@@ -75,6 +75,58 @@ async function startServer() {
     res.json({ status: "executed", command });
   });
 
+  // Event Bus & Subscriptions
+  interface Subscription {
+    id: string;
+    event: string;
+    action: string;
+    promptTemplate: string;
+  }
+  const subscriptions: Subscription[] = [
+    {
+      id: 'sub-1',
+      event: 'file_created',
+      action: 'agent_prompt',
+      promptTemplate: 'A new file was created at {{path}}. Give a short, 1-sentence enthusiastic acknowledgment.'
+    }
+  ];
+
+  app.post("/api/v1/events/emit", async (req, res) => {
+    const { event, payload } = req.body;
+    res.json({ status: "received" });
+
+    const subs = subscriptions.filter(s => s.event === event);
+    for (const sub of subs) {
+      if (sub.action === 'agent_prompt') {
+        try {
+          let prompt = sub.promptTemplate;
+          if (payload.path) prompt = prompt.replace('{{path}}', payload.path);
+          
+          const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+          const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: `System: You are OAT Agent acting autonomously on an event.\nUser: ${prompt}`
+          });
+          
+          const message = response.text;
+          clients.forEach((state, ws) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "AGENT_BROADCAST", data: message }));
+            }
+          });
+        } catch (e) {
+          console.error("Autonomous agent error:", e);
+        }
+      }
+    }
+  });
+
+  app.post("/api/v1/subscriptions", (req, res) => {
+    const sub = { id: Date.now().toString(), ...req.body };
+    subscriptions.push(sub);
+    res.json(sub);
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
