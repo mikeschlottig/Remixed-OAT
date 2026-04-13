@@ -12,7 +12,9 @@ import {
   Send,
   Plus,
   X,
-  Columns
+  Columns,
+  Mic,
+  MicOff
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -31,6 +33,11 @@ function TerminalPane({
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const [isLiveActive, setIsLiveActive] = useState(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const nextPlayTimeRef = useRef<number>(0);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -52,7 +59,9 @@ function TerminalPane({
     // Defer fitting to ensure DOM has painted and dimensions are available
     requestAnimationFrame(() => {
       try {
-        fitAddon.fit();
+        if (terminalRef.current && terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
+          fitAddon.fit();
+        }
       } catch (e) {
         console.warn("Failed to fit terminal on mount", e);
       }
@@ -75,7 +84,36 @@ function TerminalPane({
         }
       } else if (payload.type === "AGENT_BROADCAST") {
         setAgentOutput(`[Autonomous] ${payload.data}`);
+      } else if (payload.type === "AUDIO_OUT") {
+        playAudio(payload.data);
       }
+    };
+
+    const playAudio = (base64: string) => {
+      if (!audioContextRef.current) return;
+      const ctx = audioContextRef.current;
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const pcm16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(pcm16.length);
+      for (let i = 0; i < pcm16.length; i++) {
+        float32[i] = pcm16[i] / 32768;
+      }
+      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      
+      const currentTime = ctx.currentTime;
+      if (nextPlayTimeRef.current < currentTime) {
+        nextPlayTimeRef.current = currentTime;
+      }
+      source.start(nextPlayTimeRef.current);
+      nextPlayTimeRef.current += audioBuffer.duration;
     };
 
     term.onData((data) => {
@@ -84,7 +122,9 @@ function TerminalPane({
 
     const handleResize = () => {
       try {
-        fitAddon.fit();
+        if (terminalRef.current && terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
+          fitAddon.fit();
+        }
       } catch (e) {
         // Ignore resize errors if terminal is hidden or unmounted
       }
@@ -93,10 +133,68 @@ function TerminalPane({
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      if (isLiveActive) {
+        socket.send(JSON.stringify({ type: "STOP_LIVE" }));
+      }
+      if (processorRef.current) processorRef.current.disconnect();
+      if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close().catch(e => console.error(e));
+      }
       socket.close();
       term.dispose();
     };
-  }, [setNotes]);
+  }, [setNotes, isLiveActive]);
+
+  const toggleLive = async () => {
+    if (isLiveActive) {
+      if (socketRef.current) socketRef.current.send(JSON.stringify({ type: "STOP_LIVE" }));
+      if (processorRef.current) processorRef.current.disconnect();
+      if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close().catch(e => console.error(e));
+        audioContextRef.current = null;
+      }
+      setIsLiveActive(false);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioContextClass({ sampleRate: 16000 });
+        audioContextRef.current = ctx;
+        nextPlayTimeRef.current = ctx.currentTime;
+        
+        const source = ctx.createMediaStreamSource(stream);
+        const processor = ctx.createScriptProcessor(4096, 1, 1);
+        processorRef.current = processor;
+        
+        source.connect(processor);
+        processor.connect(ctx.destination);
+        
+        processor.onaudioprocess = (e) => {
+          if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+          }
+          const buffer = new Uint8Array(pcm16.buffer);
+          let binary = '';
+          for (let i = 0; i < buffer.byteLength; i++) {
+            binary += String.fromCharCode(buffer[i]);
+          }
+          const base64 = btoa(binary);
+          socketRef.current.send(JSON.stringify({ type: "AUDIO_IN", data: base64 }));
+        };
+        
+        if (socketRef.current) socketRef.current.send(JSON.stringify({ type: "START_LIVE" }));
+        setIsLiveActive(true);
+      } catch (err) {
+        console.error("Failed to start audio", err);
+      }
+    }
+  };
 
   return (
     <div className="flex-1 flex flex-col bg-[#1a1a1a] border-r border-[#333] last:border-r-0 min-w-[300px]">
@@ -105,9 +203,18 @@ function TerminalPane({
           <TerminalIcon size={12} />
           powershell
         </div>
-        <button onClick={() => onClose(id)} className="text-[#555] hover:text-red-400 p-1 rounded hover:bg-[#222]">
-          <X size={14} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={toggleLive} 
+            className={`p-1 rounded flex items-center gap-1 text-xs px-2 ${isLiveActive ? 'bg-red-500/20 text-red-400' : 'bg-[#222] text-[#888] hover:text-[#d4d4d4]'}`}
+          >
+            {isLiveActive ? <Mic size={14} /> : <MicOff size={14} />}
+            {isLiveActive ? "Live" : "Voice"}
+          </button>
+          <button onClick={() => onClose(id)} className="text-[#555] hover:text-red-400 p-1 rounded hover:bg-[#222]">
+            <X size={14} />
+          </button>
+        </div>
       </div>
       <div className="flex-1 p-4 overflow-hidden relative">
         <div ref={terminalRef} className="w-full h-full" />
@@ -126,6 +233,18 @@ export default function App() {
   const [nextTermId, setNextTermId] = useState(2);
   const [isAgentThinking, setIsAgentThinking] = useState(false);
   const [agentOutput, setAgentOutput] = useState<string | null>(null);
+
+  useEffect(() => {
+    const checkApiKey = async () => {
+      if ((window as any).aistudio) {
+        const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          await (window as any).aistudio.openSelectKey();
+        }
+      }
+    };
+    checkApiKey();
+  }, []);
 
   const handleSplitPane = () => {
     setTerminals(prev => [...prev, nextTermId]);
